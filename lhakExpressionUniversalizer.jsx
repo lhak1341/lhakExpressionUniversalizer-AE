@@ -5,7 +5,7 @@
   var CONFIG = {
     META: {
       SCRIPT_NAME: 'Universal Expression Converter',
-      VERSION: 'v0.1.0',
+      VERSION: 'v0.2.0',
       DESCRIPTION: 'Converts After Effects expressions to universal format for cross-language compatibility',
     },
 
@@ -414,12 +414,48 @@
     // 3. Merge affected layers and referenced layers
     var allAffectedLayers = mergeLayers(affectedLayers, referencedLayers);
     
-    // 4. Rename identified layers and effects, tracking changes
+    // 4. Rename identified layers and collect all effect references
+    var globalEffectMapping = {};
+    
     for (var i = 0; i < allAffectedLayers.length; i++) {
       var layer = allAffectedLayers[i];
       universalizeLayerNameWithTracking(layer);
-      universalizeLayerEffectNamesWithTracking(layer);
+      
+      // Scan this layer for effect references (including cross-layer)
+      var layerEffectMapping = findReferencedEffectsInLayer(layer, activeComp);
+      
+      // Merge into global mapping
+      for (var layerName in layerEffectMapping) {
+        if (layerEffectMapping.hasOwnProperty(layerName)) {
+          if (!globalEffectMapping[layerName]) {
+            globalEffectMapping[layerName] = [];
+          }
+          
+          // Add effects that aren't already in the global list
+          var effectNames = layerEffectMapping[layerName];
+          for (var j = 0; j < effectNames.length; j++) {
+            // Check if effect already exists (ExtendScript doesn't have indexOf)
+            var effectExists = false;
+            for (var k = 0; k < globalEffectMapping[layerName].length; k++) {
+              if (globalEffectMapping[layerName][k] === effectNames[j]) {
+                effectExists = true;
+                break;
+              }
+            }
+            if (!effectExists) {
+              globalEffectMapping[layerName].push(effectNames[j]);
+            }
+          }
+        }
+      }
     }
+    
+    // Rename all referenced effects across all layers
+    universalizeEffectsFromMapping(activeComp, globalEffectMapping);
+    
+    // 4.5. Update ALL expressions in the composition that reference renamed effects
+    // For "Selected Properties" scope, only do name updates (no property indexing)
+    updateAllExpressionsForRenamedEffects(activeComp, globalEffectMapping, false);
     
     // 5. Find all expressions in composition that reference renamed items
     var dependentProperties = findDependentExpressionsInComp(activeComp);
@@ -458,13 +494,49 @@
     //    in the selected layers, because those expressions might reference other layers' effects
     var referencedLayers = findAllReferencedLayers(selectedLayers);
     
-    // 2. Rename effects on selected layers AND any layers they reference
+    // 2. Rename layers and collect all effect references from selected layers AND any layers they reference
     var allAffectedLayers = mergeLayers(selectedLayers, referencedLayers);
+    var globalEffectMapping = {};
+    
     for (var i = 0; i < allAffectedLayers.length; i++) {
       var layer = allAffectedLayers[i];
       universalizeLayerNameWithTracking(layer);
-      universalizeLayerEffectNamesWithTracking(layer);
+      
+      // Scan this layer for effect references (including cross-layer)
+      var layerEffectMapping = findReferencedEffectsInLayer(layer, activeComp);
+      
+      // Merge into global mapping
+      for (var layerName in layerEffectMapping) {
+        if (layerEffectMapping.hasOwnProperty(layerName)) {
+          if (!globalEffectMapping[layerName]) {
+            globalEffectMapping[layerName] = [];
+          }
+          
+          // Add effects that aren't already in the global list
+          var effectNames = layerEffectMapping[layerName];
+          for (var j = 0; j < effectNames.length; j++) {
+            // Check if effect already exists (ExtendScript doesn't have indexOf)
+            var effectExists = false;
+            for (var k = 0; k < globalEffectMapping[layerName].length; k++) {
+              if (globalEffectMapping[layerName][k] === effectNames[j]) {
+                effectExists = true;
+                break;
+              }
+            }
+            if (!effectExists) {
+              globalEffectMapping[layerName].push(effectNames[j]);
+            }
+          }
+        }
+      }
     }
+    
+    // Rename all referenced effects across all layers
+    universalizeEffectsFromMapping(activeComp, globalEffectMapping);
+    
+    // 2.5. Update ALL expressions in the composition that reference renamed effects
+    // For "Selected Layers" scope, only do name updates (no property indexing)  
+    updateAllExpressionsForRenamedEffects(activeComp, globalEffectMapping, false);
     
     // 3. Find all expressions in composition that reference renamed items
     var dependentProperties = findDependentExpressionsInComp(activeComp);
@@ -515,14 +587,42 @@
       throw new Error(CONFIG.ALERT.NO_COMPOSITION);
     }
 
-    // Phase 1: Rename all layers and effects across ALL compositions first
+    // Phase 1: Collect effect references from all compositions and rename effects
     for (var i = 0; i < compositions.length; i++) {
       var comp = compositions[i];
+      var globalEffectMapping = {};
+      
       for (var j = 1; j <= comp.numLayers; j++) {
         var layer = comp.layer(j);
         universalizeLayerName(layer);
-        universalizeLayerEffectNames(layer);
+        
+        // Scan this layer for effect references (including cross-layer)
+        var layerEffectMapping = findReferencedEffectsInLayer(layer, comp);
+        
+        // Merge into global mapping for this composition
+        for (var layerName in layerEffectMapping) {
+          if (layerEffectMapping.hasOwnProperty(layerName)) {
+            if (!globalEffectMapping[layerName]) {
+              globalEffectMapping[layerName] = [];
+            }
+            
+            // Add effects that aren't already in the global list
+            var effectNames = layerEffectMapping[layerName];
+            for (var k = 0; k < effectNames.length; k++) {
+              if (globalEffectMapping[layerName].indexOf(effectNames[k]) === -1) {
+                globalEffectMapping[layerName].push(effectNames[k]);
+              }
+            }
+          }
+        }
       }
+      
+      // Rename all referenced effects in this composition
+      universalizeEffectsFromMapping(comp, globalEffectMapping);
+      
+      // Update ALL expressions that reference renamed effects
+      // For "All Comps" scope, do both name updates AND property indexing
+      updateAllExpressionsForRenamedEffects(comp, globalEffectMapping, true);
     }
     
     // Phase 2: Convert all expressions after ALL renaming is complete
@@ -952,12 +1052,48 @@
    * @param {CompItem} comp - Composition to convert
    */
   function universalizeComposition(comp) {
-    // Phase 1: Rename all layers and effects in the composition first
+    // Phase 1: Collect all effect references from all layers first
+    var globalEffectMapping = {};
+    
     for (var i = 1; i <= comp.numLayers; i++) {
       var layer = comp.layer(i);
       universalizeLayerName(layer);
-      universalizeLayerEffectNames(layer);
+      
+      // Scan this layer for effect references (including cross-layer)
+      var layerEffectMapping = findReferencedEffectsInLayer(layer, comp);
+      
+      // Merge into global mapping
+      for (var layerName in layerEffectMapping) {
+        if (layerEffectMapping.hasOwnProperty(layerName)) {
+          if (!globalEffectMapping[layerName]) {
+            globalEffectMapping[layerName] = [];
+          }
+          
+          // Add effects that aren't already in the global list
+          var effectNames = layerEffectMapping[layerName];
+          for (var j = 0; j < effectNames.length; j++) {
+            // Check if effect already exists (ExtendScript doesn't have indexOf)
+            var effectExists = false;
+            for (var k = 0; k < globalEffectMapping[layerName].length; k++) {
+              if (globalEffectMapping[layerName][k] === effectNames[j]) {
+                effectExists = true;
+                break;
+              }
+            }
+            if (!effectExists) {
+              globalEffectMapping[layerName].push(effectNames[j]);
+            }
+          }
+        }
+      }
     }
+    
+    // Rename all referenced effects across all layers
+    universalizeEffectsFromMapping(comp, globalEffectMapping);
+    
+    // Phase 1.5: Update ALL expressions that reference renamed effects
+    // For "Active Comp" scope, do both name updates AND property indexing
+    updateAllExpressionsForRenamedEffects(comp, globalEffectMapping, true);
     
     // Phase 2: Convert all expressions after all renaming is complete
     for (var i = 1; i <= comp.numLayers; i++) {
@@ -974,11 +1110,400 @@
     // First, universalize the layer name if needed
     universalizeLayerName(layer);
 
-    // Second, universalize effect names before processing expressions
-    universalizeLayerEffectNames(layer);
+    // Second, scan expressions to find which effects are actually referenced (including cross-layer)
+    var referencedEffectsMapping = findReferencedEffectsInLayer(layer, layer.containingComp);
+    
+    // Only rename effects that are actually referenced in expressions (across all layers)
+    universalizeEffectsFromMapping(layer.containingComp, referencedEffectsMapping);
 
     // Then convert all properties with expressions
     convertPropertiesInItem(layer);
+  }
+
+  /**
+   * Finds all effects referenced in expressions within a layer (including cross-layer references)
+   * @param {Layer} layer - Layer to scan
+   * @param {CompItem} comp - Composition containing the layer
+   * @returns {Object} Object with layerName -> [effectNames] mapping
+   */
+  function findReferencedEffectsInLayer(layer, comp) {
+    var referencedEffects = {};
+    
+    
+    function scanPropertyForEffectReferences(item) {
+      if (!item || !item.numProperties) return;
+      
+      for (var i = 1; i <= item.numProperties; i++) {
+        try {
+          var prop = item.property(i);
+          if (!prop) continue;
+          
+          if (prop.propertyType === PropertyType.PROPERTY && prop.expression) {
+            // Look for effect references in the expression
+            var expression = prop.expression;
+            
+            // Look for cross-layer effect references first: thisComp.layer("LayerName").effect("EffectName")
+            var crossLayerMatches = expression.match(/thisComp\.layer\s*\(\s*["']([^"']+)["']\s*\)\.effect\s*\(\s*["']([^"']+)["']\s*\)/g);
+            if (crossLayerMatches) {
+              for (var j = 0; j < crossLayerMatches.length; j++) {
+                var fullMatch = crossLayerMatches[j];
+                var match = fullMatch.match(/thisComp\.layer\s*\(\s*["']([^"']+)["']\s*\)\.effect\s*\(\s*["']([^"']+)["']\s*\)/);
+                if (match) {
+                  var targetLayerName = match[1];
+                  var effectName = match[2];
+                  
+                  // Remove [ue] suffix if already present
+                  targetLayerName = targetLayerName.replace(/\s*\[ue\]$/, '');
+                  effectName = effectName.replace(/\s*\[ue\]$/, '');
+                  
+                  try {
+                    if (!referencedEffects[targetLayerName]) {
+                      referencedEffects[targetLayerName] = [];
+                      }
+                    
+                    
+                    // Check if effect already exists (ExtendScript doesn't have indexOf)
+                    var effectExists = false;
+                    for (var k = 0; k < referencedEffects[targetLayerName].length; k++) {
+                      if (referencedEffects[targetLayerName][k] === effectName) {
+                        effectExists = true;
+                        break;
+                      }
+                    }
+                    
+                    if (!effectExists) {
+                      referencedEffects[targetLayerName].push(effectName);
+                    } else {
+                      //$.writeln('DEBUG: Effect "' + effectName + '" already exists in layer "' + targetLayerName + '" array');
+                    }
+                    //$.writeln('DEBUG: Added cross-layer effect reference: "' + effectName + '" on layer "' + targetLayerName + '"');
+                  } catch (err) {
+                    //$.writeln('DEBUG: Error in array operations: ' + err.toString());
+                  }
+                } else {
+                  //$.writeln('DEBUG: Failed to parse cross-layer match: ' + fullMatch);
+                }
+              }
+            }
+            
+            // Look for local effect references: effect("Name") but exclude ones that are part of cross-layer references
+            var allEffectMatches = expression.match(/\beffect\s*\(\s*["']([^"']+)["']\s*\)/g);
+            //$.writeln('DEBUG: Local effect matches found: ' + (allEffectMatches ? allEffectMatches.length : 0));
+            if (allEffectMatches) {
+              for (var j = 0; j < allEffectMatches.length; j++) {
+                var fullMatch = allEffectMatches[j];
+                var match = fullMatch.match(/effect\s*\(\s*["']([^"']+)["']\s*\)/);
+                if (match) {
+                  // Check if this effect call is part of a cross-layer reference
+                  var effectName = match[1];
+                  var isPartOfCrossLayer = false;
+                  
+                  if (crossLayerMatches) {
+                    for (var k = 0; k < crossLayerMatches.length; k++) {
+                      if (crossLayerMatches[k].indexOf(fullMatch) !== -1) {
+                        isPartOfCrossLayer = true;
+                        break;
+                      }
+                    }
+                  }
+                  
+                  if (!isPartOfCrossLayer) {
+                    // This is a local effect reference
+                    effectName = effectName.replace(/\s*\[ue\]$/, '');
+                    
+                    if (!referencedEffects[layer.name]) {
+                      referencedEffects[layer.name] = [];
+                    }
+                    
+                    // Check if effect already exists (ExtendScript doesn't have indexOf)
+                    var effectExists = false;
+                    for (var m = 0; m < referencedEffects[layer.name].length; m++) {
+                      if (referencedEffects[layer.name][m] === effectName) {
+                        effectExists = true;
+                        break;
+                      }
+                    }
+                    
+                    if (!effectExists) {
+                      referencedEffects[layer.name].push(effectName);
+                    }
+                    //$.writeln('DEBUG: Found local effect reference: "' + effectName + '" on layer "' + layer.name + '"');
+                  }
+                }
+              }
+            }
+          }
+          
+          // Recursively scan property groups
+          if (prop.propertyType === PropertyType.INDEXED_GROUP || 
+              prop.propertyType === PropertyType.NAMED_GROUP) {
+            scanPropertyForEffectReferences(prop);
+          }
+        } catch (err) {
+          // Skip inaccessible properties
+        }
+      }
+    }
+    
+    scanPropertyForEffectReferences(layer);
+    
+    // DEBUG: Log results
+    var totalEffects = 0;
+    for (var layerName in referencedEffects) {
+      totalEffects += referencedEffects[layerName].length;
+    }
+    //$.writeln('DEBUG: Found ' + totalEffects + ' referenced effects across layers');
+    
+    return referencedEffects;
+  }
+
+  /**
+   * Universalizes effects based on a cross-layer mapping
+   * @param {CompItem} comp - Composition containing the layers
+   * @param {Object} effectMapping - Object with layerName -> [effectNames] mapping
+   */
+  function universalizeEffectsFromMapping(comp, effectMapping) {
+    if (!comp || !effectMapping) return;
+    
+    for (var layerName in effectMapping) {
+      if (effectMapping.hasOwnProperty(layerName)) {
+        var effectNames = effectMapping[layerName];
+        
+        if (!effectNames || effectNames.length === 0) {
+          //$.writeln('DEBUG: No effects to rename for layer "' + layerName + '"');
+          continue;
+        }
+        
+        //$.writeln('DEBUG: About to rename ' + effectNames.length + ' effects on layer "' + layerName + '": ' + effectNames.join(', '));
+        
+        // Find the layer in the composition
+        var targetLayer = findLayerByName(comp, layerName);
+        if (!targetLayer) {
+          //$.writeln('DEBUG: Could not find layer "' + layerName + '" in composition');
+          continue;
+        }
+        
+        try {
+          var effectsGroup = targetLayer.property('ADBE Effect Parade');
+          if (!effectsGroup) continue;
+          
+          for (var i = 1; i <= effectsGroup.numProperties; i++) {
+            try {
+              var effect = effectsGroup.property(i);
+              if (!effect || !effect.name) continue;
+              
+              var currentName = effect.name;
+              
+              // Skip if already has universal suffix
+              if (currentName.indexOf(CONFIG.CONVERSION.UNIVERSAL_SUFFIX) !== -1) {
+                continue;
+              }
+              
+              // Only rename if this effect is in the referenced list
+              // Check if effect is in the list (ExtendScript doesn't have indexOf)
+              var effectInList = false;
+              for (var idx = 0; idx < effectNames.length; idx++) {
+                if (effectNames[idx] === currentName) {
+                  effectInList = true;
+                  break;
+                }
+              }
+              if (effectInList) {
+                //$.writeln('DEBUG: Renaming effect "' + currentName + '" to "' + currentName + ' ' + CONFIG.CONVERSION.UNIVERSAL_SUFFIX + '"');
+                effect.name = currentName + ' ' + CONFIG.CONVERSION.UNIVERSAL_SUFFIX;
+                conversionStats.effectsRenamed++;
+              } else {
+                //$.writeln('DEBUG: Skipping effect "' + currentName + '" - not in referenced list');
+              }
+            } catch (err) {
+              // Skip inaccessible effects
+            }
+          }
+        } catch (err) {
+          // Effects group not accessible or doesn't exist
+        }
+      }
+    }
+  }
+
+  /**
+   * Updates all expressions in a composition that reference renamed effects
+   * @param {CompItem} comp - Composition to update
+   * @param {Object} renamedEffectsMapping - Object with layerName -> [effectNames] mapping of renamed effects
+   * @param {boolean} includePropertyIndexing - Whether to also convert property indexing
+   */
+  function updateAllExpressionsForRenamedEffects(comp, renamedEffectsMapping, includePropertyIndexing) {
+    if (!comp || !renamedEffectsMapping) return;
+    
+    // Scan all layers in the composition
+    for (var i = 1; i <= comp.numLayers; i++) {
+      var layer = comp.layer(i);
+      updateExpressionsInLayer(layer, renamedEffectsMapping, includePropertyIndexing);
+    }
+  }
+
+  /**
+   * Updates expressions in a single layer that reference renamed effects
+   * @param {Layer} layer - Layer to update
+   * @param {Object} renamedEffectsMapping - Object with layerName -> [effectNames] mapping of renamed effects
+   * @param {boolean} includePropertyIndexing - Whether to also convert property indexing
+   */
+  function updateExpressionsInLayer(layer, renamedEffectsMapping, includePropertyIndexing) {
+    if (!layer) return;
+    
+    function updatePropertyExpressions(item) {
+      if (!item || !item.numProperties) return;
+      
+      for (var i = 1; i <= item.numProperties; i++) {
+        try {
+          var prop = item.property(i);
+          if (!prop) continue;
+          
+          if (prop.propertyType === PropertyType.PROPERTY && prop.expression) {
+            var originalExpression = prop.expression;
+            var updatedExpression = updateExpressionForRenamedEffects(originalExpression, renamedEffectsMapping, layer, includePropertyIndexing);
+            
+            if (updatedExpression !== originalExpression) {
+              prop.expression = updatedExpression;
+            }
+          }
+          
+          // Recursively process property groups
+          if (prop.propertyType === PropertyType.INDEXED_GROUP || 
+              prop.propertyType === PropertyType.NAMED_GROUP) {
+            updatePropertyExpressions(prop);
+          }
+        } catch (err) {
+          // Skip inaccessible properties
+        }
+      }
+    }
+    
+    updatePropertyExpressions(layer);
+  }
+
+  /**
+   * Updates an expression to use renamed effect names
+   * @param {string} expression - Original expression
+   * @param {Object} renamedEffectsMapping - Object with layerName -> [effectNames] mapping of renamed effects
+   * @param {Layer} contextLayer - Layer containing this expression
+   * @param {boolean} includePropertyIndexing - Whether to also convert property indexing
+   * @returns {string} Updated expression
+   */
+  function updateExpressionForRenamedEffects(expression, renamedEffectsMapping, contextLayer, includePropertyIndexing) {
+    var updated = expression;
+    
+    try {
+      // Update cross-layer effect references: thisComp.layer("LayerName").effect("EffectName")
+      for (var layerName in renamedEffectsMapping) {
+        if (renamedEffectsMapping.hasOwnProperty(layerName)) {
+          var effectNames = renamedEffectsMapping[layerName];
+          
+          for (var i = 0; i < effectNames.length; i++) {
+            var effectName = effectNames[i];
+            var originalName = effectName;
+            var universalName = effectName + ' ' + CONFIG.CONVERSION.UNIVERSAL_SUFFIX;
+            
+            // Update cross-layer references
+            var crossLayerPattern = new RegExp('thisComp\\.layer\\s*\\(\\s*["\']' + layerName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '["\']\\s*\\)\\.effect\\s*\\(\\s*["\']' + originalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '["\']\\s*\\)', 'g');
+            updated = updated.replace(crossLayerPattern, 'thisComp.layer("' + layerName + '").effect("' + universalName + '")');
+            
+            // Update local references (only if we're on the same layer)
+            if (layerName === contextLayer.name) {
+              var localPattern = new RegExp('\\beffect\\s*\\(\\s*["\']' + originalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '["\']\\s*\\)', 'g');
+              updated = updated.replace(localPattern, 'effect("' + universalName + '")');
+            }
+          }
+        }
+      }
+      
+      // Conditionally do property indexing based on scope
+      if (includePropertyIndexing) {
+        // For "Active Comp" scope - convert property indexing as well
+        updated = convertEffectPropertyIndexing(updated, contextLayer);
+      }
+      // For "Selected Properties/Layers" scope - only fix names, no property indexing
+      
+    } catch (err) {
+      // If update fails, return original expression
+    }
+    
+    return updated;
+  }
+
+  /**
+   * Converts effect property indexing for expressions that already have universal effect names
+   * @param {string} expression - Expression to convert
+   * @param {Layer} contextLayer - Layer containing the expression
+   * @returns {string} Expression with property indexing converted
+   */
+  function convertEffectPropertyIndexing(expression, contextLayer) {
+    var converted = expression;
+    
+    try {
+      // Handle property indexing for effect("name")("property") patterns
+      var effectPropRegex = /effect\s*\(\s*["']([^"']+)["']\s*\)\s*\(\s*["']([^"']+)["']\s*\)/g;
+      var matches = [];
+      var match;
+
+      // Collect all matches first from the ORIGINAL expression (not modified version)
+      while ((match = effectPropRegex.exec(expression)) !== null) {
+        matches.push({
+          fullMatch: match[0],
+          effectName: match[1],
+          propertyName: match[2],
+          matchIndex: match.index
+        });
+      }
+
+      // Sort matches by index in reverse order to avoid position shifting during replacement
+      matches.sort(function(a, b) { return b.matchIndex - a.matchIndex; });
+
+      // Process each match for property indexing (from end to beginning)
+      for (var i = 0; i < matches.length; i++) {
+        var matchData = matches[i];
+        var effectName = matchData.effectName;
+        var propertyName = matchData.propertyName;
+
+        // Remove [ue] suffix for property index lookup
+        var cleanEffectName = effectName.replace(' ' + CONFIG.CONVERSION.UNIVERSAL_SUFFIX, '');
+        
+        // Get property index for this effect property
+        var targetLayer = findLayerWithEffect(contextLayer, cleanEffectName, expression, matchData.fullMatch);
+        var propertyIndex = getEffectPropertyIndex(targetLayer, cleanEffectName, propertyName);
+        
+        if (propertyIndex > 0) {
+          // Replace effect("name")("property") with effect("name")(index) using string position
+          var replacement = 'effect("' + effectName + '")(' + propertyIndex + ')';
+          
+          // Use substring replacement to avoid regex state issues
+          var beforeMatch = converted.substring(0, matchData.matchIndex);
+          var afterMatch = converted.substring(matchData.matchIndex + matchData.fullMatch.length);
+          converted = beforeMatch + replacement + afterMatch;
+        }
+      }
+      
+    } catch (err) {
+      // If property indexing fails, return expression as-is
+    }
+    
+    return converted;
+  }
+
+  /**
+   * Universalizes only the specified effect names (legacy function for backward compatibility)
+   * @param {Layer} layer - Layer containing effects
+   * @param {Array} effectNames - Array of effect names to universalize
+   */
+  function universalizeReferencedEffectNames(layer, effectNames) {
+    if (!layer || !effectNames || effectNames.length === 0) {
+      //$.writeln('DEBUG: No effects to rename for layer "' + layer.name + '"');
+      return;
+    }
+    
+    var mapping = {};
+    mapping[layer.name] = effectNames;
+    universalizeEffectsFromMapping(layer.containingComp, mapping);
   }
 
   /**
@@ -1052,8 +1577,8 @@
                    prop.propertyType === PropertyType.NAMED_GROUP) {
           // Handle effect groups specially
           if (prop.matchName && prop.matchName.indexOf('ADBE Effect Parade') !== -1) {
-            // This is an effects group - universalize effect names
-            universalizeEffectNames(prop);
+            // Skip effect group processing - effects should already be renamed selectively
+            // in the earlier phase if they were referenced in expressions
           }
           
           // Recursively process property groups
@@ -1089,7 +1614,8 @@
             prop.propertyType === PropertyType.NAMED_GROUP) {
           // Handle effect groups specially
           if (prop.matchName && prop.matchName.indexOf('ADBE Effect Parade') !== -1) {
-            universalizeEffectNames(prop);
+            // Skip effect group processing - effects should already be renamed selectively
+            // in the earlier phase if they were referenced in expressions
           }
           
           // Recursively process property groups
@@ -1384,8 +1910,17 @@
         if (transformMappings.hasOwnProperty(prop)) {
           // Use word boundaries for better matching, but handle dots specially
           var pattern = prop.replace(/\./g, '\\.');
-          var regex = new RegExp('\\b' + pattern + '\\b', 'g');
-          converted = converted.replace(regex, transformMappings[prop]);
+          // Create regex that captures the property and any following array access [0], [1], etc.
+          var regex = new RegExp('\\b' + pattern + '(\\[[0-9]+\\])?\\b', 'g');
+          converted = converted.replace(regex, function(match, arrayAccess) {
+            if (arrayAccess) {
+              // If there's array access, add thisLayer prefix and append the array access
+              return 'thisLayer' + transformMappings[prop] + arrayAccess;
+            } else {
+              // No array access, add thisLayer prefix for local property references
+              return 'thisLayer' + transformMappings[prop];
+            }
+          });
         }
       }
 
@@ -1476,18 +2011,24 @@
       var effectPropRegex = /effect\s*\(\s*["']([^"']+)["']\s*\)\s*\(\s*["']([^"']+)["']\s*\)/g;
       var matches = [];
       var match;
+      
+      // Store the string to scan for matches (before any modifications)
+      var stringToScan = converted;
 
-      // Collect all matches first
-      while ((match = effectPropRegex.exec(converted)) !== null) {
+      // Collect all matches first from the original string (not modified version)
+      while ((match = effectPropRegex.exec(stringToScan)) !== null) {
         matches.push({
           fullMatch: match[0],
           effectName: match[1],
           propertyName: match[2],
-          matchIndex: match.index // Track position to avoid duplicates
+          matchIndex: match.index
         });
       }
 
-      // Process each match for property indexing
+      // Sort matches by index in reverse order to avoid position shifting during replacement
+      matches.sort(function(a, b) { return b.matchIndex - a.matchIndex; });
+
+      // Process each match for property indexing (from end to beginning)
       for (var i = 0; i < matches.length; i++) {
         var matchData = matches[i];
         var effectName = matchData.effectName;
@@ -1498,14 +2039,16 @@
         
         // Get property index for this effect property
         // For cross-layer references, we need to find the right layer
-        var targetLayer = findLayerWithEffect(contextLayer, cleanEffectName, converted, matchData.fullMatch);
+        var targetLayer = findLayerWithEffect(contextLayer, cleanEffectName, stringToScan, matchData.fullMatch);
         var propertyIndex = getEffectPropertyIndex(targetLayer, cleanEffectName, propertyName);
         
         if (propertyIndex > 0) {
           var replacement = 'effect("' + effectName + '")(' + propertyIndex + ')';
-          converted = converted.replace(matchData.fullMatch, replacement);
-          // Since we modified the string, break out to avoid processing stale matches
-          break;
+          
+          // Use substring replacement to avoid regex state issues
+          var beforeMatch = converted.substring(0, matchData.matchIndex);
+          var afterMatch = converted.substring(matchData.matchIndex + matchData.fullMatch.length);
+          converted = beforeMatch + replacement + afterMatch;
         }
       }
 
@@ -1804,6 +2347,7 @@
     try {
       // Look for layer reference in the full expression context around the effect match
       var effectIndex = fullExpression.indexOf(effectMatch);
+      
       if (effectIndex > 0) {
         // Get some context before the effect match
         var contextBefore = fullExpression.substring(Math.max(0, effectIndex - 50), effectIndex + effectMatch.length);

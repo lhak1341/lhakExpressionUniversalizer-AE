@@ -133,6 +133,58 @@ After Effects Project
 - **Expression Complexity**: Handles expressions up to 5KB characters
 - **Undo Group Size**: Single undo operation for entire conversion regardless of scope
 
+### Recent Fixes (v0.2.0)
+
+#### **Resolved: Incomplete Single-Pass Conversion**
+- **Issue**: Effect property indexing conversion was failing for expressions containing multiple effect references
+- **Root Cause**: Two critical bugs in regex processing:
+  1. **Regex State Corruption**: `regex.exec()` called on strings being modified during processing loop
+  2. **Early Loop Exit**: `break` statement causing only first effect to be processed per expression
+- **Solution**: Implemented robust regex processing pattern:
+  - Collect all matches from original string before any modifications
+  - Process matches in reverse order (end-to-beginning) to prevent position shifting
+  - Use substring replacement instead of regex replace to avoid state conflicts
+- **Functions Fixed**: `convertEffectPropertyIndexing()`, `convertEffectReferences()`
+- **Impact**: All effect property patterns now convert correctly in single pass
+
+#### **Resolved: Transform Array Access Syntax**
+- **Issue**: `transform.scale[0]` converted incorrectly to `(5)(6)[0]` causing AE parsing errors
+- **Solution**: Added `thisLayer` prefix and proper parentheses: `thisLayer(1)(4)[0]`
+- **Impact**: Array access syntax now works properly with universal indexing
+
+#### **Resolved: Unnecessary Effect Renaming**
+- **Issue**: All effects getting `[ue]` suffix regardless of whether they were referenced in expressions
+- **Solution**: Implemented selective effect renaming based on expression analysis
+- **Impact**: Only effects actually referenced in expressions are renamed, reducing project modification scope
+
+#### **Technical Implementation Details**
+The regex processing fix addresses a common pitfall in JavaScript regex usage:
+
+**Problem Pattern** (Buggy):
+```javascript
+var regex = /pattern/g;
+while ((match = regex.exec(string)) !== null) {
+  string = string.replace(match[0], replacement); // ❌ Breaks regex state
+}
+```
+
+**Solution Pattern** (Fixed):
+```javascript
+var regex = /pattern/g;
+var matches = [];
+// Phase 1: Collect all matches first
+while ((match = regex.exec(originalString)) !== null) {
+  matches.push({match: match[0], index: match.index});
+}
+// Phase 2: Process in reverse order to avoid position shifting
+matches.sort((a, b) => b.index - a.index);
+for (var i = 0; i < matches.length; i++) {
+  // Use substring replacement instead of regex replace
+}
+```
+
+This pattern ensures reliable multi-match processing in ExtendScript environments.
+
 ### Known Issues
 
 - **Shape Content Indexing**: Deliberately excluded - shape structure too variable across projects
